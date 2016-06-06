@@ -37,7 +37,6 @@ extern const char* PORT;
 // create list for the clients. 
 static list_t clientList;
 static list_t gameList;
-
 // flag to stop all of the threads
 static int isWorking;
 
@@ -50,6 +49,7 @@ typedef struct client_t
 {
     int socket;
     char * name;
+    void* game_ptr; // void* because game_t is defined later...
 } client_t;
 
 typedef struct game_t
@@ -66,8 +66,12 @@ typedef struct game_t
     char shipsB[MAP_WIDTH][MAP_HEIGHT];
     char visableB[MAP_WIDTH][MAP_HEIGHT];
 
+    // mutex to lock the struct, and condition variable in case I need to wait.
     pthread_t gameLock;
     pthread_cond_t lockCond;
+
+    // Checks for the active player. 'A' for client A, 'B' for client B
+    char activePlayer;
 } game_t;
 
 // function to handle the clients using threads.
@@ -77,13 +81,12 @@ void* Handle_Client(void* param);
 void Broadcast_Message(char * msg);
 void Send_Message(char * msg, client_t* client);
 
-int AddInvitation(char * name, client_t* client);
+game_t* AddInvitation(char * name, client_t* client);
 int CancelInvitation(client_t* client);
 game_t* AcceptInvitation(char * name, client_t* client);
 game_t* Init_Game();
 
-// string compare because strcmp was giving me issues
-int StrCmp(char*s1,char*s2);
+void MainGameLoop(game_t* game, client_t* client);
 
 int main (void)
 {
@@ -97,7 +100,6 @@ int main (void)
     char buf[BUFFER_SIZE]; 
     int len = 0;			// Misc Counters, etc.
     int i = 0;
-    char * host; 
 
     isWorking = 1;
     // Initialize the list.
@@ -223,6 +225,8 @@ void* Handle_Client(void* param)
     char sendBuf[BUFFER_SIZE + NAME_SIZE + 2];
     int clientDone = 0;
     int nameOkay = 0;
+    game_t* game = NULL;
+    char game_side = '\0';
 
     // get username
     send(client->socket, "Enter your username: ", 22, 0);
@@ -252,6 +256,12 @@ void* Handle_Client(void* param)
     // listen for input    
     while ( isWorking && !clientDone && (len = recv(client->socket, buf, BUFFER_SIZE, 0)) > 0 )
     {
+        if(game != NULL &&game->started)
+        {
+            MainGameLoop(game,client);
+            game = NULL;
+        }
+
         // handle the input of the client, just append their name.
         strcpy(sendBuf,client->name);
         
@@ -266,6 +276,19 @@ void* Handle_Client(void* param)
                 // send message to every client
                 Broadcast_Message(sendBuf);
             }
+            else if(strstr(buf,"/cancel") == buf) // invite someone to a game
+            {
+                int isCanceled = CancelInvitation(client);
+                if(isCanceled)
+                {
+                    Send_Message("Invitation canceled",client);
+                    game = NULL;
+                }
+                else
+                {
+                    Send_Message("No invitation pending",client);
+                }
+            }
             else if(strstr(buf,"/invite") == buf) // invite someone to a game
             {
                 strcpy(buf, buf + 8); // get the name of the invitee
@@ -277,14 +300,19 @@ void* Handle_Client(void* param)
                 strcat(sendBuf, " to a game");
 
                 // add invite
-                AddInvitation(buf, client);
+                game = AddInvitation(buf, client);
                 // send message to every client
                 Broadcast_Message(sendBuf);
+
+                //TODO: Wait for the acceptance. for like 10 seconds.
+                //
+                //if game->started, then it was accepted.
             }
             else if(strstr(buf,"/accept") == buf) // accept an invite
             {
-                strcpy(buf, buf + 8);
+                strcpy(buf, buf + 8); // get the name
             
+                //attempt to accept
                 game_t* game = AcceptInvitation(buf, client);
                 if(game != NULL)
                 {
@@ -296,14 +324,8 @@ void* Handle_Client(void* param)
 
                     // send message to every client
                     Broadcast_Message(sendBuf);
-
-                    // just wait here until the game finishes.
-                    pthread_mutex_lock(&(game->gameLock)); // lock
-                    while(game->started) // while game in progress
-                    {
-                        pthread_cond_wait(&(game->lockCond),&(game->gameLock)); // sleep until game over
-                    }
-                    pthread_mutex_unlock(&(game->gameLock)); // unlock
+                    MainGameLoop(game,client);
+                    game = NULL;    
                 }
                 else
                 {
@@ -374,7 +396,7 @@ int CancelInvitation(client_t* client)
         List_Remove_At(foundGameNode);
     }
 
-    List_Done_Iterating(clientList);
+    List_Done_Iterating(gameList);
 
     return foundGame;
 }
@@ -384,19 +406,21 @@ int CancelInvitation(client_t* client)
 // a user from inviting multiple people and the server creating multiple
 // games for the user and messing things up.
 //
-// returns 1 if successful, 0 if not.
-int AddInvitation(char * name, client_t* client)
+// returns the game if there is not already a game invite.
+game_t* AddInvitation(char * name, client_t* client)
 {
     // try to find a game. If none found, add it
     int notFoundGame = 1;
     list_item_t current = List_First(gameList);
     list_item_t prev = current;
     current = List_Next(current);
+    game_t* game = NULL;
     while(notFoundGame && current != NULL)
     {
-        game_t * game = (game_t*)List_Get_At(current);
+        game = (game_t*)List_Get_At(current);
         if(strcmp(game->clientA->name,client->name) == 0)
         {
+            game = NULL;
             notFoundGame = 0; // found one, don't add another
         }
         prev = current;
@@ -405,7 +429,6 @@ int AddInvitation(char * name, client_t* client)
 
     if(notFoundGame)
     {
-        notFoundGame = 1;
         // find other client
         client_t* otherClient = NULL;
         int foundClient = 0;
@@ -414,12 +437,11 @@ int AddInvitation(char * name, client_t* client)
         curClient = List_Next(curClient);
         while(!foundClient && curClient != NULL)
         {
-            // ############### RIGHT HERE PHIL! #################
             otherClient = (client_t*)List_Get_At(curClient);
             int dif = strcmp(name,otherClient->name);
             if(dif == 0)
             {
-                foundClient == 1;
+                foundClient = 1;
             }
             curClient = List_Next(curClient);
         }
@@ -435,12 +457,12 @@ int AddInvitation(char * name, client_t* client)
         
             List_Insert_At(prev,newGame);
 
-            notFoundGame = 0;
+            notFoundGame = 1;
         }
     }
     List_Done_Iterating(gameList);
 
-    return notFoundGame;
+    return game;
 }
 
 // Creates a game and starts play for two players
@@ -532,7 +554,60 @@ game_t* Init_Game()
 
     pthread_mutex_init(&(newGame->gameLock),NULL);
     pthread_cond_init(&(newGame->lockCond),NULL);
+
+    newGame->activePlayer = 'A';
+
+    newGame->started = 0;
+
     return newGame;
+}
+
+// Main game logic loop for battleship
+void MainGameLoop(game_t* game, client_t* client)
+{
+    char playerSide = 'B';
+    int validInput = 0;
+    char buf[BUFFER_SIZE];
+
+    if(client == game->clientA)
+    {
+        playerSide = 'A';
+    }
+
+    // TODO: get the ships placed
+
+    
+    while(game->started)
+    {
+        // Start the locked section...
+        pthread_mutex_lock(&(game->gameLock));
+        
+        Display_Game(game,playerSide);
+
+        // Get player input loop
+        
+        // interpret input -- change map
+
+        pthread_mutex_unlock(&(game->gameLock));
+        pthread_cond_signal(&(game->lockCond));
+    }
+
+}
+
+void Place_Ships(game_t* game, client_t* client)
+{
+    // list of ship spaces and names
+    int shipSizes[] = { 5, 4, 3, 3, 2 };
+    const char * shipNames[] ={ "Battleship", "", "", "", ""};
+    char buf[BUFFER_SIZE];
+    int len = 0;
+
+    // display map
+    //
+    // loop through each ship
+    //
+    // prompt for the location [row][col] and dir (u,d,l,r)
+    // try to place the ship
 }
 
 // Displays the map. side if A or B, which is related to the client and map names
@@ -565,6 +640,7 @@ void Display_Game(game_t* game, char side)
     int row;
 
     // display the top bar
+    // TODO:change to send... not print
     printf("____________________________________________________________");
     printf("|    --- Home Side ---        |      --- Enemy Side ---    |\n");
     printf("|    A B C D E F G H I J      |      A B C D E F G H I J   |\n");
@@ -580,16 +656,3 @@ void Display_Game(game_t* game, char side)
     printf("____________________________________________________________");
 }
 
-int StrCmp(char * s1, char * s2)
-{
-    int dif = 0;
-    char * ptr = s1;
-    char * ptr2 = s2;
-
-    for(ptr = s1, ptr2 = s2; *ptr != NULL && *ptr2 != NULL; ++ptr, ++ptr2)
-    {
-        dif += *ptr - *ptr2;
-    }
-
-    return dif;
-}

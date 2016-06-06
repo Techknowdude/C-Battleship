@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-Wall -D_POSIX_C_SOURCE -g -O0
+CFLAGS=-Wall -D_POSIX_C_SOURCE -g -O0 -Wall
 CLIENT_OBJ_FILES = client.o
 SERVER_OBJ_FILES = server.o list.o
 LIBS = -lpthread sharedInfo.h
