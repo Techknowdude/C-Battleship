@@ -638,13 +638,13 @@ void Place_Ships(game_t* game, client_t* client)
     for(i = 0; i < 5; ++i)
     {
         Display_Game(game,client);
-        write(client->socket,"\n",2);
+        send(client->socket,"\n",2,0);
 
         int valid = 0;
         do
         {
             len = sprintf(buf, "Please place your %s: [Column][Row][Direction] ex: F5D\n",shipNames[i]);
-            write(client->socket,buf,len);
+            send(client->socket,buf,len,0);
 
             len = recv(client->socket, buf,BUFFER_SIZE,0);
 
@@ -668,13 +668,13 @@ void Place_Ships(game_t* game, client_t* client)
                     else
                     {
                     len = sprintf(buf, "That ship either cannot fit, or overlaps another ship\n");
-                    write(client->socket,buf,len);
+                    send(client->socket,buf,len,0);
                     }
                 }
                 else
                 {
                     len = sprintf(buf, "Bad input. Columns are A-J, Rows are 0-9, Directions are (U)p (D)own (R)ight and (L)eft\n");
-                    write(client->socket,buf,len);
+                    send(client->socket,buf,len,0);
                 }
             }
             
@@ -786,6 +786,6 @@ void Display_Game(game_t* game, client_t* client)
 
     size += sprintf(buf + size,"____________________________________________________________\n");
 
-    write(client->socket,buf,size);
+    send(client->socket,buf,size,0);
 }
 
