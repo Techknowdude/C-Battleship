@@ -126,14 +126,23 @@ void* ListenerFunc(void* param)
     int socket = *((int*)param);
     int len;
     char buf[BUFFER_SIZE]; // read buffer
+    char * printPtr = buf;
     char sendBuf[BUFFER_SIZE + NAME_SIZE];
     int clientDone = 0;
-    
+    int printed = 0;
     // listen for input    
     while ( isWorking && (len = recv(socket, buf, BUFFER_SIZE, 0)) > 0 )
     {
-        printf(buf);
-        printf("\n");
+        printPtr = buf;
+        while(len > 0)
+        {
+            printed = printf(printPtr);
+            fflush(stdout);
+            len -= printed + 1;
+            printPtr += printed + 1;
+        }
+        // clear the buffer, maybe that will help.
+        memset(buf,'\0',BUFFER_SIZE);
     }
 }
 

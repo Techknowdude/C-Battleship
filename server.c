@@ -91,6 +91,8 @@ void Display_Game(game_t* game, client_t* client);
 void MainGameLoop(game_t* game);
 int Try_Place_Boat(char map[][MAP_WIDTH],char col, int row, char dir, int spaces);
 void Place_Ships(game_t* game, client_t* client);
+char CheckGameOver(game_t* game);
+int Shoot_Boat(game_t* game, int col, int row, client_t* client);
 
 int main (void)
 {
@@ -256,6 +258,7 @@ void* Handle_Client(void* param)
     len = recv(client->socket, buf, BUFFER_SIZE, 0);
     strcpy(sendBuf, client->name);
     strcat(sendBuf," has joined!");
+    strcat(sendBuf,"\n");
     Broadcast_Message(sendBuf);
 
     // listen for input    
@@ -267,12 +270,12 @@ void* Handle_Client(void* param)
             {
                 Place_Ships(game,client);
                 // not sure if this will ever get the lock...
-                pthread_mutex_lock(&(game->gameLock));
+                //pthread_mutex_lock(&(game->gameLock));
                 while(game->started)
                 {
-                    pthread_cond_wait(&(game->lockCond),&(game->gameLock));
+                  //  pthread_cond_wait(&(game->lockCond),&(game->gameLock));
                 }
-                pthread_mutex_unlock(&(game->gameLock));
+                //pthread_mutex_unlock(&(game->gameLock));
                 game = NULL;
             }
         }
@@ -287,6 +290,7 @@ void* Handle_Client(void* param)
             if(strstr(buf,"/quit") == buf)
             {
                 strcat(sendBuf,"has left!");
+                strcat(sendBuf,"\n");
                 clientDone = 1; // break the loop after the send.
                 // send message to every client
                 Broadcast_Message(sendBuf);
@@ -296,12 +300,12 @@ void* Handle_Client(void* param)
                 int isCanceled = CancelInvitation(client);
                 if(isCanceled)
                 {
-                    Send_Message("Invitation canceled",client);
+                    Send_Message("Invitation canceled\n",client);
                     game = NULL;
                 }
                 else
                 {
-                    Send_Message("No invitation pending",client);
+                    Send_Message("No invitation pending\n",client);
                 }
             }
             else if(strstr(buf,"/invite") == buf) // invite someone to a game
@@ -313,15 +317,28 @@ void* Handle_Client(void* param)
                 strcat(sendBuf, " has invited ");
                 strcat(sendBuf, buf);
                 strcat(sendBuf, " to a game");
+                strcat(sendBuf,"\n");
 
                 // add invite
                 game = AddInvitation(buf, client);
                 // send message to every client
                 Broadcast_Message(sendBuf);
-
-                //TODO: Wait for the acceptance. for like 10 seconds.
-                //
-                //if game->started, then it was accepted.
+            }
+            else if(strstr(buf,"/who") == buf)
+            {
+                int index = 0;
+                strcpy(buf,"Current users:\n");
+                list_item_t cur = List_First(clientList);
+                cur = List_Next(cur);
+                while(cur != NULL)
+                {
+                    client_t* cClient = (client_t*)List_Get_At(cur);
+                    sprintf(buf +strlen(buf), "%3i: %s\n",index, cClient->name);
+                    cur = List_Next(cur);
+                    ++index;
+                }
+                List_Done_Iterating(clientList);
+                Send_Message(buf,client);
             }
             else if(strstr(buf,"/accept") == buf) // accept an invite
             {
@@ -336,6 +353,7 @@ void* Handle_Client(void* param)
                     strcat(sendBuf, " has accepted the invite from ");
                     strcat(sendBuf, buf);
                     strcat(sendBuf, " to a game");
+                    strcat(sendBuf,"\n");
 
                     // send message to every client
                     Broadcast_Message(sendBuf);
@@ -345,19 +363,20 @@ void* Handle_Client(void* param)
                 }
                 else
                 {
-                    Send_Message("No pending invite from user",client);
+                    Send_Message("No pending invite from user\n",client);
                 }
             }
             else    
             {
                 // command not recognized   
-                Send_Message("Command not recognized",client);
+                Send_Message("Command not recognized\n",client);
             }
         }
         else    
         {
             strcat(sendBuf,": ");
             strcat(sendBuf,buf);
+            strcat(sendBuf,"\n");
             // send message to every client
             Broadcast_Message(sendBuf);
         }
@@ -583,11 +602,12 @@ void MainGameLoop(game_t* game)
 {
     char buf[BUFFER_SIZE];
     int len = 0;
+    char result = ' ';
 
     client_t* client = NULL;
 
-    // TODO: get the ships placed
-
+    // wait for other player to place ships.
+    while(game->started != 3);
     
     while(game->started)
     {
@@ -600,28 +620,73 @@ void MainGameLoop(game_t* game)
             client = game->clientB;
         }
 
-        //while not my turn, sleep
-        // Start the locked section...
-        
         Display_Game(game, game->clientA);
         Display_Game(game, game->clientB);
 
-        sprintf(buf,"Player %s's turn: ",client->name);
+        sprintf(buf,"### Player %s's turn ###\n",client->name);
         Send_Message(buf,game->clientA);
         Send_Message(buf,game->clientB);
 
-        // Get player input loop
-        len = recv(client->socket, buf,BUFFER_SIZE,0);
+        int valid = 0;
 
-        
-        // interpret input -- change map
+        do
+        {
+            // Get player input loop
+            len = recv(client->socket, buf,BUFFER_SIZE,0);
+
+            // interpret input -- change map
+            int row = buf[1] - '0';
+            int col = toupper(buf[0]) - 'A';
+
+            int hit = Shoot_Boat(game,col,row,client);
+
+            valid = 1;
+
+            if(hit == 1)
+            {
+                sprintf(buf,"%c%i HIT!\n",buf[0],row);
+                Send_Message(buf,game->clientA);
+                Send_Message(buf,game->clientB);
+            }
+            else if(hit == 0)
+            {
+                sprintf(buf,"%c%i MISS!\n",buf[0],row);
+                Send_Message(buf,game->clientA);
+                Send_Message(buf,game->clientB);
+            }
+            else
+            {
+                strcpy(buf,"Invalid location. A-j, 0-9 are accepted\n");
+                Send_Message(buf,client);
+                valid = 0;
+            }
+        }while(!valid);
+
 
         // change turns.
         game->activePlayer = game->activePlayer == 'A' ? 'B' : 'A';
+
+        result = CheckGameOver(game);
+        if(result != 'N')
+            game->started = 0;
     }
+
+    if(result == 'A')
+        sprintf(buf,"Player %s has won!\n",game->clientA->name);
+    else
+        sprintf(buf,"Player %s has won!\n",game->clientB->name);
+
+    Send_Message(buf,game->clientA);
+    Send_Message(buf,game->clientB);
     
     // wake up the listener for the other client
-    pthread_cond_signal(&(game->lockCond));
+    //pthread_cond_signal(&(game->lockCond));
+
+    // push the clients back in the list.
+    list_item_t cur = List_First(clientList);
+    List_Insert_At(cur,game->clientA);
+    List_Insert_At(cur,game->clientB);
+    List_Done_Iterating(clientList);
 }
 
 void Place_Ships(game_t* game, client_t* client)
@@ -632,18 +697,33 @@ void Place_Ships(game_t* game, client_t* client)
     char buf[BUFFER_SIZE];
     int len = 0;
 
+    // remove the client from the list
+    list_item_t cur = List_First(clientList);
+    cur = List_Next(cur);
+    while(cur != NULL)
+    {
+        client_t* cClient = (client_t*)List_Get_At(cur);
+        if(cClient == client)
+        {
+            List_Remove_At(cur);
+            break;
+        }
+        cur = List_Next(cur);
+    }
+    List_Done_Iterating(clientList);
+
     //
     // loop through each ship
     int i;
     for(i = 0; i < 5; ++i)
     {
         Display_Game(game,client);
-        send(client->socket,"\n",2,0);
 
         int valid = 0;
         do
         {
             len = sprintf(buf, "Please place your %s: [Column][Row][Direction] ex: F5D\n",shipNames[i]);
+            sleep(0);
             send(client->socket,buf,len,0);
 
             len = recv(client->socket, buf,BUFFER_SIZE,0);
@@ -655,7 +735,7 @@ void Place_Ships(game_t* game, client_t* client)
             
                 if((buf[0] >= 'a' && buf[0] <= 'z'
                     || buf[0] >= 'A' && buf[0] <= 'Z') 
-                    && (row > 0 && row <= MAP_WIDTH)
+                    && (row >= 0 && row < MAP_WIDTH)
                     && (dir == 'U' || dir == 'D' || dir == 'L' || dir == 'R'))
                 {
                     int placed;
@@ -681,10 +761,88 @@ void Place_Ships(game_t* game, client_t* client)
         } while(!valid);
     }
 
-    // prompt for the location [row][col] and dir (u,d,l,r)
-    // try to place the ship
+    ++game->started;
 }
 
+// returns 'N' for not over, or 'A' for clientA win, and 'B' for clientB win.
+char CheckGameOver(game_t* game)
+{
+    return 'A'; // testing...
+    // check for clientA win
+    int r = 0;
+    int c = 0;
+    int winA = 1;
+    int winB = 1;
+
+    for(r = 0; (winA || winB) && r < MAP_HEIGHT; ++r)
+    {
+        for(c = 0; (winA || winB) && c < MAP_WIDTH; ++c)
+        {
+            // if one ship space has not been hit, set win to 0;
+            if(winA && game->shipsB[r][c] == 'B')
+                winA = 0;
+            if(winB && game->shipsA[r][c] == 'B')
+                winB = 0;
+        }
+    }
+    if(winA == 1)
+        return 'A';
+    else if(winB == 1)
+        return 'B';
+
+    return 'N';
+}
+
+// 1 if hit, 0 if miss. -1 on invalid
+int Shoot_Boat(game_t* game, int col, int row, client_t* client)
+{
+    if(col < 0 || col >= MAP_WIDTH || row < 0 || row >= MAP_HEIGHT) return -1;
+
+    int hit = 0;
+
+    if(client == game->clientA)
+    {
+        if(game->visableA[row][col] != '-')
+        {
+            hit = -1;
+        }
+        else if(game->shipsB[row][col] == 'B')
+        {
+            hit = 1;
+            game->visableA[row][col] = 'X';
+            game->shipsB[row][col] = 'X';
+        }
+        else
+        {
+            hit = 0;
+            game->visableA[row][col] = 'O';
+            game->shipsB[row][col] = 'O';
+        }
+    }
+    else
+    {
+        if(game->visableB[row][col] != '-')
+        {
+            hit = -1;
+        }
+        else if(game->shipsA[row][col] == 'B')
+        {
+            hit = 1;
+            game->visableB[row][col] = 'X';
+            game->shipsA[row][col] = 'X';
+        }
+        else
+        {
+            hit = 0;
+            game->visableB[row][col] = 'O';
+            game->shipsA[row][col] = 'O';
+        }
+    }
+
+    return hit;
+}
+
+// 1 if placed, 0 if not
 int Try_Place_Boat(char map[][MAP_WIDTH],char col, int row, char dir, int spaces)
 {
     int canPlace = 1;
@@ -754,15 +912,15 @@ void Display_Game(game_t* game, client_t* client)
     //
 
     // display the top bar
-    size = sprintf(buf,         "____________________________________________________________\n");
-    size += sprintf(buf + size,"|    --- Home Side ---        |      --- Enemy Side ---    |\n");
-    size += sprintf(buf + size,"|    A B C D E F G H I J      |      A B C D E F G H I J   |\n");
+    size = sprintf(buf,        "______________________________________________________\n");
+    size += sprintf(buf + size,"|    --- Home Side ---    |    --- Enemy Side ---   |\n");
+    size += sprintf(buf + size,"|    A B C D E F G H I J  |    A B C D E F G H I J  |\n");
     for(row = 0; row < 10; ++ row)
     {
         if(game->clientA == client)
         {
 
-        size += sprintf(buf +size,"| %2i %c %c %c %c %c %c %c %c %c %c      |   %2i %c %c %c %c %c %c %c %c %c %c   |\n", 
+        size += sprintf(buf +size,"| %2i %c %c %c %c %c %c %c %c %c %c  | %2i %c %c %c %c %c %c %c %c %c %c  |\n", 
             row,
              game->shipsA[row][0], game->shipsA[row][1], game->shipsA[row][2], game->shipsA[row][3], game->shipsA[row][4], game->shipsA[row][5], game->shipsA[row][6], game->shipsA[row][7], game->shipsA[row][8], game->shipsA[row][9],
             row,
@@ -772,19 +930,19 @@ void Display_Game(game_t* game, client_t* client)
         }
         else
         {
-        size += sprintf(buf + size,"| %2i %c %c %c %c %c %c %c %c %c %c      |   %2i %c %c %c %c %c %c %c %c %c %c   |\n", 
-            row+1,
+        size += sprintf(buf + size,"| %2i %c %c %c %c %c %c %c %c %c %c  | %2i %c %c %c %c %c %c %c %c %c %c  |\n", 
+            row,
             game->shipsB[row][0], game->shipsB[row][1], game->shipsB[row][2], game->shipsB[row][3], 
             game->shipsB[row][4], game->shipsB[row][5], game->shipsB[row][6], game->shipsB[row][7],
             game->shipsB[row][8], game->shipsB[row][9],
-            row+1,
+            row,
             game->visableB[row][0],game->visableB[row][1],game->visableB[row][2],game->visableB[row][3],
             game->visableB[row][4],game->visableB[row][5],game->visableB[row][6],game->visableB[row][7],
             game->visableB[row][8],game->visableB[row][9]);
         }
     }
 
-    size += sprintf(buf + size,"____________________________________________________________\n");
+    size += sprintf(buf + size,"_____________________________________________________\n");
 
     send(client->socket,buf,size,0);
 }
